@@ -1,0 +1,68 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          pytest tests/
+
+      - name: Build Docker image
+        run: |
+          docker build -t todo-app .
+
+      - name: Run Docker container for health check
+        run: |
+          docker run -d -p 5000:5000 --name todo-container-check todo-app
+          sleep 5  # attendre que l'app démarre
+
+      - name: Health check
+        id: healthcheck
+        run: |
+          echo "Checking application health..."
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health)
+          if [ "$status" -ne 200 ]; then
+            echo "Health check failed! Status: $status"
+            docker logs todo-container-check || true
+            exit 1
+          fi
+          echo "Health check passed."
+
+      - name: Push to Docker Hub
+        if: github.ref == 'refs/heads/master' && steps.healthcheck.outcome == 'success'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          echo "Logging in to Docker Hub"
+          docker login -u $DOCKERHUB_USERNAME -p $DOCKERHUB_TOKEN
+          echo "Tagging image"
+          docker tag todo-app $DOCKERHUB_USERNAME/todo-app:latest
+          echo "Pushing image to Docker Hub"
+          docker push $DOCKERHUB_USERNAME/todo-app:latest
+
+      - name: Cleanup Docker container
+        if: always()
+        run: |
+          docker stop todo-container-check || true
+          docker rm todo-container-check || true
